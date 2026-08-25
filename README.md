@@ -18,13 +18,10 @@
 - **静态备查**：自动生成 `分析结果汇总.xlsx`（含「明细」「企业汇总」两个工作表），方便离线查阅。
 
 ## 快速开始
+### 安装 Python
+安装 Python 3.8+（Windows 安装时勾选 "Add Python to PATH"）。
 
-1. 安装 Python 3.8+（Windows 安装时勾选 "Add Python to PATH"）。
-2. 双击 `run.bat`，首次运行会自动安装依赖（`pip install -r requirements.txt`），之后完全离线使用。
-   - 或手动：`python -m pip install -r requirements.txt` → `python -m streamlit run app.py`
-3. 浏览器打开 `http://localhost:8501`。
-
-## 数据准备
+### 数据准备
 首先，把 data\ 中的示例文件删干净；
 再把你单位的 Excel 文件放入项目根目录的 `data/` 文件夹，文件名格式：
 
@@ -48,6 +45,13 @@
 | 负债总额 |
 
 `sample_data_generator.py` 可生成一套演示数据，便于开箱体验（数据均为虚构示例）。
+
+### 开始分析
+1. 双击 `run.bat`，首次运行会自动安装依赖（`pip install -r requirements.txt`），之后完全离线使用。
+   - 或手动：`python -m pip install -r requirements.txt` → `python -m streamlit run app.py`
+2. 浏览器打开 `http://localhost:8501`。
+
+
 
 ## 目录结构
 
