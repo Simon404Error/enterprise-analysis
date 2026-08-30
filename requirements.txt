@@ -3,3 +3,4 @@ openpyxl
 numpy
 streamlit
 plotly
+xlrd

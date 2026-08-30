@@ -1,31 +1,85 @@
 # -*- coding: utf-8 -*-
 """
-报告生成模块：
-  1) 生成静态备查 Excel：分析结果汇总.xlsx
-     - Sheet1「明细」：所有企业各年度完整指标表（百分数列为 ×100 展示）
-     - Sheet2「企业汇总」：每个企业一行的汇总统计
-  2) 动态生成文字经营报告（Markdown），供面板展示/下载
+报告生成模块（地区维度）：
+  1) 静态备查 Excel：分析结果汇总.xlsx
+     - Sheet「地区年度明细」：地区 × 年度，全部指标（比率/增长率 ×100 展示）
+     - Sheet「地区汇总」：每个地区一行
+     - Sheet「公示分布」：各地区 全部/部分/全部不公示 企业数
+  2) 动态文字经营报告（Markdown）：按地区生成，供面板展示/下载。
+本项目只做「整个地区」分析，不按单个企业维度输出。
 """
 import numpy as np
 import pandas as pd
 
-from config import (OUTPUT_XLSX, COL_REGION, COL_ENTERPRISE, COL_YEAR,
-                    NUMERIC_COLS, RATIO_COLS, GROWTH_COLS, STD_COLS)
-from analysis import add_metrics, enterprise_summary, metrics_for_display, safe_div
+from config import (OUTPUT_XLSX, COL_REGION, COL_YEAR, NUMERIC_COLS, GROWTH_COLS,
+                    MAIN_INCOME_WARN, TURNOVER_ACTIVE,
+                    PUBLISH_ALL, PUBLISH_PART, PUBLISH_NONE)
+from analysis import (region_yearly, add_region_metrics, publish_by_region,
+                      publish_by_region_year, region_summary, metrics_for_display, safe_div)
+
+# 「地区年度明细」表中删除的列（M-O：是否股权转让、是否对外投资、来源文件）
+_DROP_COLS = ['是否股权转让', '是否对外投资', '来源文件']
+# 跨年合计（年度=ALL）的标志
+_ALL_YEAR = 'ALL'
+# 跨年合计行：比率按加总后的数值重算（口径同 add_region_metrics）
+_RATIO_MAP = {
+    '销售净利率': ('净利润', '销售额或营业收入'),
+    '净利润率': ('净利润', '销售额或营业收入'),
+    '净资产收益率(ROE)': ('净利润', '所有者权益合计'),
+    '资产负债率': ('负债总额', '资产总额'),
+    '主营业务收入占比': ('营业总收入中主营业务收入', '销售额或营业收入'),
+    '总资产周转率': ('销售额或营业收入', '资产总额'),
+}
+
+
+def _build_all_rows(region_df):
+    """每个地区数值列跨年加总，年度记 ALL，比率按合计重算，增长率置空。"""
+    g = region_df.groupby(COL_REGION)[NUMERIC_COLS].sum(min_count=1).reset_index()
+    g[COL_YEAR] = _ALL_YEAR
+    for col, (n, d) in _RATIO_MAP.items():
+        g[col] = safe_div(g[n], g[d])
+    for c in GROWTH_COLS:
+        g[c] = np.nan
+    # 标准差沿用地区各年度波动（与逐年明细行一致）
+    for col, std_col in [('销售额或营业收入', '销售额标准差'), ('净利润', '净利润标准差')]:
+        s = region_df.groupby(COL_REGION)[col].std().rename(std_col)
+        g = g.merge(s, left_on=COL_REGION, right_index=True, how='left')
+    return g
+
+# 数值列（用于增长趋势的标签/列名对照）
+_NUM_LABELS = ['销售额或营业收入', '净利润', '资产总额', '营业总收入中主营业务收入']
 
 
 # ---------------- 静态 Excel ----------------
-def write_result_excel(df, path=None):
-    """将完整指标表写入 Excel。df 应为已计算指标的明细表。"""
+def write_result_excel(detail_df, region_df=None, path=None):
+    """生成「分析结果汇总.xlsx」。region_df 为地区×年度指标表。"""
     path = path or OUTPUT_XLSX
-    detail = metrics_for_display(df)      # 百分数列 ×100
-    summary = metrics_for_display(enterprise_summary(df))
+    if region_df is None:
+        region_df = add_region_metrics(region_yearly(detail_df))
+    detail = metrics_for_display(region_df)
+    # 删除 M-O 三列（是否股权转让、是否对外投资、来源文件）
+    detail = detail.drop(columns=[c for c in _DROP_COLS if c in detail.columns])
+    # 跨年合计：每个地区数值列加总，年度记 ALL，比率按合计重算
+    all_rows = metrics_for_display(_build_all_rows(region_df))
+    all_rows = all_rows.drop(columns=[c for c in _DROP_COLS if c in all_rows.columns])
+    # 同地区放一起：先逐年度行，再追加该地区跨年合计行
+    parts = []
+    for region in sorted(detail[COL_REGION].unique()):
+        parts.append(detail[detail[COL_REGION] == region].sort_values(COL_YEAR))
+        arow = all_rows[all_rows[COL_REGION] == region]
+        if not arow.empty:
+            parts.append(arow)
+    detail = pd.concat(parts, ignore_index=True)
+    summary = metrics_for_display(region_summary(region_df))
+    # 公示分布按「地区 × 年度」区分，不计跨年总和
+    _, pub_tab = publish_by_region_year(detail_df)
 
     with pd.ExcelWriter(path, engine='openpyxl') as writer:
-        detail.to_excel(writer, sheet_name='明细', index=False)
-        summary.to_excel(writer, sheet_name='企业汇总', index=False)
+        detail.to_excel(writer, sheet_name='地区年度明细', index=False)
+        summary.to_excel(writer, sheet_name='地区汇总', index=False)
+        if not pub_tab.empty:
+            pub_tab.to_excel(writer, sheet_name='公示分布', index=False)
 
-    # 调整列宽（openpyxl 直接操作）
     from openpyxl import load_workbook
     wb = load_workbook(path)
     for ws in wb.worksheets:
@@ -49,85 +103,96 @@ def _fmt(v, digits=2):
     return f'{v:,.{digits}f}'
 
 
-def _num_with_year(df, col):
-    """数据中出现过多少个不同的年度值。"""
-    return sorted(df[COL_YEAR].dropna().unique())
-
-
-def generate_region_report(df, region):
-    """按地区生成文字报告（Markdown）。"""
-    sub = df[df[COL_REGION] == region]
+def generate_region_report(region_df, region, pub_tab=None):
+    """按地区生成经营报告（Markdown）。region_df 为地区×年度指标表。"""
+    sub = region_df[region_df[COL_REGION] == region].sort_values(COL_YEAR)
     if sub.empty:
         return f'# 【{region}】\n\n（该地区无数据）'
-    years = _num_with_year(sub, COL_YEAR)
-    n_ent = sub[COL_ENTERPRISE].nunique()
+    years = list(sub[COL_YEAR])
     latest = years[-1]
-    cur = sub[sub[COL_YEAR] == latest]
+    cur = sub[sub[COL_YEAR] == latest].iloc[0]
 
     L = [f'# 【{region}】经营状况报告', '']
     L.append(f'- 覆盖年度：{years[0]} ~ {years[-1]}（共 {len(years)} 个年度）')
-    L.append(f'- 企业数量：{n_ent} 家；明细记录：{len(sub)} 条')
     L.append('')
 
-    # 最新年度整体盈利
-    sales_sum = cur['销售额或营业收入'].sum()
-    profit_sum = cur['净利润'].sum()
-    equity_sum = cur['所有者权益合计'].sum()
-    L.append(f'## 盈利能力（{latest} 年）')
-    L.append(f'- 销售总额：{_fmt(sales_sum)} 万元；净利润总额：{_fmt(profit_sum)} 万元')
-    L.append(f'- 整体销售净利率：{_pct(safe_div(profit_sum, sales_sum))}')
-    L.append(f'- 整体净资产收益率(ROE)：{_pct(safe_div(profit_sum, equity_sum))}')
+    # ---- 最新年度整体盈利能力 ----
+    L.append(f'## 盈利能力（{latest} 年，地区整体）')
+    L.append(f'- 销售额（营业收入）：{_fmt(cur["销售额或营业收入"])} 万元')
+    L.append(f'- 净利润：{_fmt(cur["净利润"])} 万元')
+    L.append(f'- 销售净利率 / 净利润率：{_pct(cur["销售净利率"])}')
+    L.append(f'- 净资产收益率(ROE)：{_pct(cur["净资产收益率(ROE)"])}')
     L.append('')
 
-    # 增长趋势
-    L.append('## 增长趋势')
-    g = sub.groupby(COL_YEAR, as_index=False)['销售额或营业收入'].sum()
-    for i in range(1, len(g)):
-        y = int(g.iloc[i][COL_YEAR])
-        prev = g.iloc[i - 1]['销售额或营业收入']
-        c = g.iloc[i]['销售额或营业收入']
-        if pd.notna(prev) and prev != 0:
-            L.append(f'- {y} 年销售额 {_fmt(c)} 万元，同比 {_pct((c - prev) / prev)}')
-        else:
-            L.append(f'- {y} 年销售额 {_fmt(c)} 万元，同比 NA（上年数据缺失）')
+    # ---- 增长趋势（同比） ----
+    L.append('## 增长趋势（同比，>1 个年度才有值）')
+    for label in _NUM_LABELS:
+        col = label + '同比增长率'
+        if col not in sub.columns:
+            continue
+        entries = [f'{int(y)}年 {_pct(v)}' for y, v in zip(sub[COL_YEAR], sub[col])
+                   if pd.notna(v)]
+        if entries:
+            L.append(f'- {label}：' + '、'.join(entries))
     L.append('')
 
-    # 稳定性（企业级标准差）
-    L.append('## 经营稳定性')
-    std_s = sub.groupby(COL_ENTERPRISE)['净利润'].std()
-    avg_std = std_s.mean()
-    n_unstable = (std_s > std_s.median()).sum() if len(std_s) else 0
-    L.append(f'- 企业净利润标准差均值：{_fmt(avg_std)} 万元（值越大波动越大）')
-    if len(std_s):
-        worst = std_s.idxmax()
-        L.append(f'- 波动最大企业：{worst}（标准差 {_fmt(std_s.max())} 万元）')
-    L.append('')
-
-    # 异常提示
-    L.append('## 异常数据提示')
-    n_first_year = len(sub[sub[COL_YEAR] == years[0]])
-    tips = []
-    if len(years) == 1:
-        tips.append('仅有 1 个年度数据，无法计算增长率（同比/环比均为 NA）。')
+    # ---- 净利润率趋势 → 扩张 / 下降 / N/A ----
+    L.append('## 盈利质量与扩张趋势')
+    margins = sub['销售净利率']
+    if margins.notna().any():
+        seq = '、'.join(f'{int(y)}年 {_pct(v)}' for y, v in zip(sub[COL_YEAR], margins))
+        L.append(f'- 各年度整体净利润率：{seq}')
+        valid = margins.dropna()
+        if len(valid) >= 2:
+            r = valid.iloc[-1] - valid.iloc[0]
+            if r > 1e-9:
+                L.append('- 净利润率总体呈上升趋势：反映该地区企业营收扩张、资本扩张、利润增长。')
+            elif r < -1e-9:
+                L.append('- 净利润率总体呈下降趋势：提示盈利承压。')
+            else:
+                L.append('- 净利润率总体基本持平。')
+        assets = sub['资产总额']
+        if len(assets) >= 2:
+            L.append(f'- 地区资产总额由 {_fmt(assets.iloc[0])} 万元增至 {_fmt(assets.iloc[-1])} 万元'
+                     f'（{int(sub.iloc[0][COL_YEAR])} → {int(sub.iloc[-1][COL_YEAR])}）。')
     else:
-        n_na = int(sub['销售额同比增长率'].isna().sum() - n_first_year)
-        if n_na > 0:
-            tips.append(f'有 {n_na} 条记录因上年数据缺失（或上年为 0）无法计算增长率，已标记 NA。')
-    n_zero_equity = int((sub['所有者权益合计'] == 0).sum())
-    if n_zero_equity > 0:
-        tips.append(f'有 {n_zero_equity} 条记录所有者权益为 0，ROE 无法计算（NA）。')
-    n_neg_equity = int((sub['所有者权益合计'] < 0).sum())
-    if n_neg_equity > 0:
-        tips.append(f'有 {n_neg_equity} 条记录所有者权益为负，ROE 为负值，注意复核数据。')
-    missing_years = []
-    for ent, g in sub.groupby(COL_ENTERPRISE):
-        ys = set(g[COL_YEAR].unique())
-        for y in range(min(ys), max(ys) + 1):
-            if y not in ys:
-                missing_years.append((ent, y))
-    if missing_years:
-        tips.append(f'有 {len(missing_years)} 个“企业-年度”存在年度断档（如企业某年缺失），'
-                    f'相关增长率为 NA。示例：{missing_years[0][0]} 缺 {missing_years[0][1]} 年。')
+        L.append('- 无法计算净利润率（销售额或净利润缺失/为 0），净利润率趋势记为 N/A。')
+    L.append('')
+
+    # ---- 主营占比 / 周转率 / 亏损但周转快 ----
+    L.append('## 经营与结构提示')
+    focus = cur['主营业务收入占比']
+    L.append(f'- 主营业务收入占比：{_pct(focus)}'
+             + (f'（低于 {MAIN_INCOME_WARN * 100:.0f}%，依赖非主营、经营稳定性可能较差）'
+                if pd.notna(focus) and focus < MAIN_INCOME_WARN else ''))
+    turnover = cur['总资产周转率']
+    L.append(f'- 总资产周转率：{_pct(turnover)}（越高，资产使用效率 / 产能利用率越高）')
+    if pd.notna(turnover) and cur['净利润'] < 0 and turnover > TURNOVER_ACTIVE:
+        L.append('- 提示：该地区虽亏损但资产周转快，说明运营活跃、产能利用率高。')
+    L.append('')
+
+    # ---- 公示分布 ----
+    L.append('## 公示状况（本地区内企业）')
+    if pub_tab is not None and not pub_tab.empty and (pub_tab[COL_REGION] == region).any():
+        row = pub_tab[pub_tab[COL_REGION] == region].iloc[0]
+        L.append(f'- 全部公示：{int(row.get(PUBLISH_ALL, 0))} 家；部分公示：{int(row.get(PUBLISH_PART, 0))} 家；'
+                 f'全部不公示：{int(row.get(PUBLISH_NONE, 0))} 家。')
+    else:
+        L.append('- （无企业明细，无法统计公示分布。）')
+    L.append('')
+
+    # ---- 异常提示 ----
+    L.append('## 异常数据提示')
+    tips = []
+    if len(years) < 2:
+        tips.append('仅有 1 个年度数据，无法计算增长率。')
+    n_na = int(sub['销售额同比增长率'].isna().sum() - (1 if len(sub) else 0))
+    if n_na > 0:
+        tips.append(f'有 {n_na} 条因上年数据缺失（或断档/为 0），增长率为 NA。')
+    if (sub['所有者权益合计'] == 0).any():
+        tips.append(f'有 {int((sub["所有者权益合计"] == 0).sum())} 条所有者权益为 0，ROE 为 NA。')
+    if (sub['所有者权益合计'] < 0).any():
+        tips.append(f'有 {int((sub["所有者权益合计"] < 0).sum())} 条所有者权益为负，ROE 为负值。')
     if not tips:
         tips.append('未发现明显异常。')
     for t in tips:
@@ -136,83 +201,27 @@ def generate_region_report(df, region):
     return '\n'.join(L)
 
 
-def generate_enterprise_report(df, region, enterprise):
-    """按企业生成文字报告（Markdown）。"""
-    sub = df[(df[COL_REGION] == region) & (df[COL_ENTERPRISE] == enterprise)]
-    if sub.empty:
-        return f'# 【{enterprise}】\n\n（无数据）'
-    sub = sub.sort_values(COL_YEAR)
-    years = list(sub[COL_YEAR])
-
-    L = [f'# 【{enterprise}】经营状况报告', '']
-    L.append(f'- 地区：{region}；覆盖年度：{years[0]} ~ {years[-1]}（共 {len(years)} 年）')
-    L.append('')
-
-    L.append('## 各年度核心指标')
-    L.append('| 年度 | 销售额(万元) | 净利润(万元) | 销售净利率 | ROE | 销售额同比 | 净利润同比 |')
-    L.append('|---|---|---|---|---|---|---|')
-    for _, r in sub.iterrows():
-        L.append(f"| {int(r[COL_YEAR])} | {_fmt(r['销售额或营业收入'])} | {_fmt(r['净利润'])} | "
-                 f"{_pct(r['销售净利率'])} | {_pct(r['净资产收益率(ROE)'])} | "
-                 f"{_pct(r['销售额同比增长率'])} | {_pct(r['净利润同比增长率'])} |")
-    L.append('')
-
-    L.append('## 综合评价')
-    first, last = sub.iloc[0], sub.iloc[-1]
-    # 盈利能力趋势
-    margin0, margin1 = first['销售净利率'], last['销售净利率']
-    if pd.notna(margin0) and pd.notna(margin1):
-        trend = '提升' if margin1 > margin0 else ('下降' if margin1 < margin0 else '持平')
-        L.append(f'- 盈利能力：销售净利率由 {_pct(margin0)}（{int(first[COL_YEAR])} 年）'
-                 f"{trend}至 {_pct(margin1)}（{int(last[COL_YEAR])} 年）。")
-    # 稳定性
-    std_profit = sub['净利润'].std()
-    std_sales = sub['销售额或营业收入'].std()
-    L.append(f'- 稳定性：净利润标准差 {_fmt(std_profit)} 万元，销售额标准差 {_fmt(std_sales)} 万元'
-             f"{'（仅一个年度，波动无法评估）' if len(years) < 2 else '。'}")
-    # 最新增长
-    g = last['销售额同比增长率']
-    if pd.isna(g):
-        L.append(f'- 最新年度（{int(last[COL_YEAR])}）销售额同比：NA（上年数据缺失或为 0）。')
-    else:
-        L.append(f"- 最新年度（{int(last[COL_YEAR])}）销售额同比 {_pct(g)}，净利润同比 {_pct(last['净利润同比增长率'])}。")
-    # 异常
-    probs = []
-    if pd.isna(last['净资产收益率(ROE)']):
-        probs.append('最新年度 ROE 无法计算（所有者权益为 0 或缺失）')
-    elif last['净资产收益率(ROE)'] < 0:
-        probs.append('最新年度 ROE 为负（所有者权益为负或亏损）')
-    if len(years) < 2:
-        probs.append('仅单年度数据，增长与波动指标不可用')
-    if probs:
-        L.append(f'- ⚠ 异常提示：{"；".join(probs)}。')
-    else:
-        L.append('- 未发现明显异常。')
-    L.append('')
-    return '\n'.join(L)
-
-
-def generate_report(df, region=None, enterprise=None):
-    """总入口：region/enterprise 均为空时生成地区级报告合集。"""
-    if df is None or df.empty:
+def generate_report(detail_df, region_df=None, region=None):
+    """总入口（地区维度）：region 为空时生成全部地区报告合集。"""
+    if detail_df is None or detail_df.empty:
         return '# 经营状况报告\n\n（当前筛选条件下无数据）'
-    if enterprise:
-        return generate_enterprise_report(df, region, enterprise)
+    if region_df is None:
+        region_df = metrics_for_display(add_region_metrics(region_yearly(detail_df)))
+    _, pub_tab = publish_by_region(detail_df)
     if region:
-        return generate_region_report(df, region)
-    # 全部地区：逐个生成并拼接
-    parts = []
-    for r in sorted(df[COL_REGION].unique()):
-        parts.append(generate_region_report(df, r))
+        return generate_region_report(region_df, region, pub_tab)
+    parts = [generate_region_report(region_df, r, pub_tab)
+             for r in sorted(region_df[COL_REGION].unique())]
     return '\n\n---\n\n'.join(parts)
 
 
 if __name__ == '__main__':
     import file_loader
+    from analysis import region_yearly, add_region_metrics, metrics_for_display
     d, msgs = file_loader.load_all()
     for m in msgs:
         print(m)
     if not d.empty:
-        d2 = add_metrics(d)
-        print(write_result_excel(d2))
-        print(generate_report(d2)[:500])
+        region = metrics_for_display(add_region_metrics(region_yearly(d)))
+        print(write_result_excel(d, region))
+        print(generate_report(d, region)[:400])
