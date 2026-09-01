@@ -12,6 +12,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'data')                # Excel 数据目录（可含年份子文件夹）
 OUTPUT_XLSX = os.path.join(BASE_DIR, '分析结果汇总.xlsx')  # 静态输出 Excel
 
+# ---------------- Word 报告 ----------------
+REPORT_DEFAULT_DOCX = os.path.join(BASE_DIR, '经营分析报告.docx')  # 方式A 默认输出
+REPORT_FORM_XLSX    = os.path.join(BASE_DIR, '报告填写表单.xlsx')    # 方式B 表单
+REPORT_IMG_DIR      = os.path.join(BASE_DIR, 'report_img')          # 自定义图片目录（可选）
+# 图表映射文件（方式A 也支持）：每行「图表名称=图片文件路径」，优先于自动生成
+REPORT_IMG_MAP      = os.path.join(BASE_DIR, '图表映射.txt')
+
 # ---------------- 文件名规则 ----------------
 # 年度报告记录 (地区名).xlsx / .xls  或 年度报告记录 (地区名1).xlsx（数字为分卷号）
 # 兼容中英文括号、可选空格；支持 .xlsx 与 .xls
