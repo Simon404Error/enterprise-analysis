@@ -133,6 +133,26 @@ def _fix_year_axis(ax, years):
         ax.set_xlim(min(years) - 1, max(years) + 1)
 
 
+def _plot_series(ax, years, series, label, marker='o'):
+    """在固定年份刻度 years 上绘制一条序列，返回该序列是否画出了折线。
+
+    - ≥2 个有效点：画折线（缺失/断档年份的缺口自动断开，不越空连线）；
+    - 恰 1 个有效点：只画孤立标记点（无法构成趋势线）；
+    - 无有效点：不画。
+    这样避免「数据点不足却画出乱线 / 只有孤点冒充折线图」的显示错误。
+    """
+    s = pd.Series(series, dtype='float64').reindex(years)
+    n = int(s.notna().sum())
+    if n == 0:
+        return False
+    if n == 1:
+        v = s.dropna()
+        ax.plot(v.index, v.values, linestyle='None', marker=marker, label=label)
+        return False
+    ax.plot(years, s.values, marker=marker, label=label)
+    return True
+
+
 def _overall_table(detail, region, hide):
     cnt = detail.groupby([COL_REGION, COL_YEAR]).size().rename('企业数量').reset_index()
     rows = []
@@ -277,12 +297,17 @@ def _chart_overall(region, style, img_dir):
         fig.savefig(p, dpi=150); plt.close(fig)
         return p
     if style == '折线图':
+        years = sorted(region[COL_YEAR].unique())
         g = region.groupby(COL_YEAR).agg(销售额=('销售额或营业收入', 'sum'),
                                          净利润=('净利润', 'sum')).reset_index()
+        gs = g.set_index(COL_YEAR)
         fig, ax = plt.subplots(figsize=(7.2, 3.4))
-        ax.plot(g[COL_YEAR], g['销售额'], marker='o', label='销售额')
-        ax.plot(g[COL_YEAR], g['净利润'], marker='s', label='净利润')
-        _fix_year_axis(ax, region[COL_YEAR].unique())
+        d1 = _plot_series(ax, years, gs['销售额'], '销售额')
+        d2 = _plot_series(ax, years, gs['净利润'], '净利润', marker='s')
+        if not (d1 or d2):
+            plt.close(fig)
+            return None
+        _fix_year_axis(ax, years)
         ax.set_xlabel('年度'); ax.set_ylabel('万元'); ax.set_title('销售额与净利润趋势（万元）')
         ax.legend(); ax.grid(True, alpha=0.3)
         fig.tight_layout()
@@ -312,15 +337,20 @@ def _chart_metrics(region, style, img_dir):
         fig.savefig(p, dpi=150); plt.close(fig)
         return p
     if style == '折线图':
+        years = sorted(region[COL_YEAR].unique())
         g = region.groupby(COL_YEAR).agg(净利=('净利润', 'sum'), 权益=('所有者权益合计', 'sum'),
                                          销售=('销售额或营业收入', 'sum'),
                                          资产=('资产总额', 'sum')).reset_index()
-        g['ROE'] = g['净利'] / g['权益'].replace(0, np.nan) * 100
-        g['周转'] = g['销售'] / g['资产'].replace(0, np.nan) * 100
+        gs = g.set_index(COL_YEAR)
+        gs['ROE'] = gs['净利'] / gs['权益'].replace(0, np.nan) * 100
+        gs['周转'] = gs['销售'] / gs['资产'].replace(0, np.nan) * 100
         fig, ax = plt.subplots(figsize=(7.2, 3.4))
-        ax.plot(g[COL_YEAR], g['ROE'], marker='o', label='净资产收益率(ROE)%')
-        ax.plot(g[COL_YEAR], g['周转'], marker='s', label='总资产周转率%')
-        _fix_year_axis(ax, region[COL_YEAR].unique())
+        d1 = _plot_series(ax, years, gs['ROE'], '净资产收益率(ROE)%')
+        d2 = _plot_series(ax, years, gs['周转'], '总资产周转率%', marker='s')
+        if not (d1 or d2):
+            plt.close(fig)
+            return None
+        _fix_year_axis(ax, years)
         ax.set_xlabel('年度'); ax.set_ylabel('%')
         ax.set_title('地区整体 ROE / 总资产周转率 趋势')
         ax.legend(); ax.grid(True, alpha=0.3)
@@ -342,26 +372,24 @@ def _chart_growth(region, growth_cols, style, img_dir):
         axes = np.array(axes).ravel()
         any_any = False
         for ax, c in zip(axes, growth_cols):
-            any_valid = False
+            drew_here = False
             for reg, g in region.groupby(COL_REGION):
                 g = g.sort_values(COL_YEAR)
+                if c not in g.columns:
+                    continue
                 vals = metrics_for_display(g)
-                if c not in vals.columns:
-                    continue
-                mask = vals[c].notna()
-                if not mask.any():
-                    continue
-                any_valid = True
-                any_any = True
-                ax.plot(g.loc[mask, COL_YEAR], vals[c].loc[mask], marker='o', label=str(reg))
+                s = vals.set_index(COL_YEAR)[c]
+                s = s[~s.index.duplicated(keep='last')]
+                if _plot_series(ax, years, s, str(reg)):
+                    drew_here = True
+                    any_any = True
             ax.set_title(c.replace('同比增长率', '同比(%)'))
-            ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
-            if len(years) == 1:
-                ax.set_xticks(years); ax.set_xlim(years[0] - 1, years[0] + 1)
-            else:
-                ax.set_xticks(years); ax.set_xlim(min(years) - 1, max(years) + 1)
-            if not any_valid:
+            ax.grid(True, alpha=0.3)
+            _fix_year_axis(ax, years)
+            if not drew_here:
                 ax.set_visible(False)
+            else:
+                ax.legend(fontsize=7)
         for ax in axes[len(growth_cols):]:
             ax.set_visible(False)
         if not any_any:
@@ -410,11 +438,17 @@ def _form_chart(df, mid, style, img_dir, growth_cols=None):
                 ax.set_ylabel('万元'); ax.set_title('各年度各地区 销售额 / 净利润')
                 ax.legend(); ax.grid(True, axis='y', alpha=0.3)
             else:
+                years = sorted(df[COL_YEAR].unique())
                 g = df.groupby(COL_YEAR).agg(销售额=('销售额或营业收入', 'sum'),
                                              净利润=('净利润', 'sum')).reset_index()
+                gs = g.set_index(COL_YEAR)
                 fig, ax = plt.subplots(figsize=(7.2, 3.4))
-                ax.plot(g[COL_YEAR], g['销售额'], marker='o', label='销售额')
-                ax.plot(g[COL_YEAR], g['净利润'], marker='s', label='净利润')
+                d1 = _plot_series(ax, years, gs['销售额'], '销售额')
+                d2 = _plot_series(ax, years, gs['净利润'], '净利润', marker='s')
+                if not (d1 or d2):
+                    plt.close(fig)
+                    return None
+                _fix_year_axis(ax, years)
                 ax.set_xlabel('年度'); ax.set_ylabel('万元')
                 ax.set_title('销售额与净利润趋势（万元）')
                 ax.legend(); ax.grid(True, alpha=0.3)
@@ -432,13 +466,21 @@ def _form_chart(df, mid, style, img_dir, growth_cols=None):
                 ax.set_ylabel('%'); ax.set_title(f'{latest} 年各地区经营指标对比')
                 ax.legend(); ax.grid(True, axis='y', alpha=0.3)
             else:
+                years = sorted(df[COL_YEAR].unique())
                 g = df.groupby(COL_YEAR).mean(numeric_only=True).reset_index()
+                gs = g.set_index(COL_YEAR)
                 fig, ax = plt.subplots(figsize=(7.2, 3.4))
-                if '净资产收益率(ROE)' in g:
-                    ax.plot(g[COL_YEAR], g['净资产收益率(ROE)'], marker='o', label='净资产收益率(ROE)%')
-                if '总资产周转率' in g:
-                    ax.plot(g[COL_YEAR], g['总资产周转率'], marker='s', label='总资产周转率%')
-                _fix_year_axis(ax, df[COL_YEAR].unique())
+                drew = False
+                if '净资产收益率(ROE)' in gs:
+                    if _plot_series(ax, years, gs['净资产收益率(ROE)'], '净资产收益率(ROE)%'):
+                        drew = True
+                if '总资产周转率' in gs:
+                    if _plot_series(ax, years, gs['总资产周转率'], '总资产周转率%', marker='s'):
+                        drew = True
+                if not drew:
+                    plt.close(fig)
+                    return None
+                _fix_year_axis(ax, years)
                 ax.set_xlabel('年度'); ax.set_ylabel('%')
                 ax.set_title('经营指标年度趋势（%）')
                 ax.legend(); ax.grid(True, alpha=0.3)
@@ -456,22 +498,23 @@ def _form_chart(df, mid, style, img_dir, growth_cols=None):
                 axes = np.array(axes).ravel()
                 any_any = False
                 for ax, c in zip(axes, gcols):
-                    any_valid = False
+                    drew_here = False
                     for reg, g in df.groupby(COL_REGION):
                         g = g.sort_values(COL_YEAR)
                         if c not in g:
                             continue
-                        mask = g[c].notna()
-                        if not mask.any():
-                            continue
-                        any_valid = True
-                        any_any = True
-                        ax.plot(g.loc[mask, COL_YEAR], g.loc[mask, c], marker='o', label=str(reg))
+                        s = g.set_index(COL_YEAR)[c]
+                        s = s[~s.index.duplicated(keep='last')]
+                        if _plot_series(ax, years, s, str(reg)):
+                            drew_here = True
+                            any_any = True
                     ax.set_title(c.replace('同比增长率', '同比(%)'))
-                    ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
+                    ax.grid(True, alpha=0.3)
                     _fix_year_axis(ax, years)
-                    if not any_valid:
+                    if not drew_here:
                         ax.set_visible(False)
+                    else:
+                        ax.legend(fontsize=7)
                 for ax in axes[len(gcols):]:
                     ax.set_visible(False)
                 if not any_any:
@@ -699,8 +742,12 @@ def _build(detail, region, pub, info, modules, hide, overrides):
                                       lambda: _chart_publish(pub, style, img_dir), overrides)
             if style == '表格':
                 _add_table(doc, '表：' + m['name'], df.columns.tolist(), df.values.tolist())
-            else:
+            elif p:
                 _add_chart(doc, p)
+            else:
+                _add_table(doc, '表：' + m['name']
+                           + '（所选样式因年度数据不足无法成图，改以表格呈现）',
+                           df.columns.tolist(), df.values.tolist())
     finally:
         shutil.rmtree(img_dir, ignore_errors=True)
 
@@ -880,7 +927,9 @@ def generate_from_form(form_path, out_path=None):
                     if p2:
                         _add_chart(doc, p2)
                     else:
-                        doc.add_paragraph('（该模块数据不足，未插入图表。）')
+                        _add_table(doc, '表：' + m['name']
+                                   + '（所选样式因年度数据不足无法成图，改以表格呈现）',
+                                   df.columns.tolist(), df.values.tolist())
     finally:
         shutil.rmtree(img_dir, ignore_errors=True)
 
