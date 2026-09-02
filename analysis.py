@@ -6,7 +6,7 @@
   比率类（销售净利率、净利润率、ROE、资产负债率、主营业务收入占比、总资产周转率）：
       - 主营业务收入占比 = 主营业务收入 / 营业收入 ×100%
       - 总资产周转率 = 营业收入 / 平均资产总额 ×100%（平均资产 = (上年末+当年末)/2）
-  增长率（销售额 / 净利润 / 资产总额 / 主营业务收入 同比与环比，年度数据下同比=环比）：
+  增长率（销售额 / 净利润 / 资产总额 / 主营业务收入 同比，年度逐期与上一相邻年度比较）：
       按「地区」分组、年度升序，仅与上一个实际出现且相邻的年度比较；
       上年缺失（断档）或上年为 0 时记 NaN（展示为 NA），避免除零。
   标准差（销售额、净利润）：地区各年度数值的样本标准差（万元），衡量地区经营波动。
@@ -57,7 +57,9 @@ def _prev_row(df, col):
 
 def strict_growth(df, col):
     """地区严格相邻年度的同比增长率：仅当上一个出现的年度 == 当前年度-1 时计算；
-    上年缺失（断档）或上年为 0 时记 NaN。df 需已按 地区+年度 排序。"""
+    上年缺失（断档）、上年为 0 或为负、或本年与上年跨过 0（由亏转盈/由盈转亏）时
+    记 NaN——这些情形下「增长率 %」失去实际意义，避免输出 117382% 之类失真值。
+    df 需已按 地区+年度 排序。"""
     g = df.groupby(COL_REGION, as_index=False)
     prev_v = g[col].shift(1)
     prev_y = g[COL_YEAR].shift(1)
@@ -65,11 +67,33 @@ def strict_growth(df, col):
         r = (df[col] - prev_v) / prev_v
     r = r.replace([np.inf, -np.inf], np.nan)
     adjacent = (df[COL_YEAR] - prev_y) == 1
-    return r.where(adjacent)
+    meaningful = (prev_v > 0) & (df[col] > 0)  # 基期与现期均为正才有可比意义
+    return r.where(adjacent & meaningful)
 
 
-def add_region_metrics(region_df):
-    """在地区×年度聚合表上计算全部派生指标（地区整体口径）。返回新 DataFrame。"""
+def _firm_main_ratio(detail):
+    """从企业明细计算各地区「主营业务收入占比」（区域整体口径，分子分母同主体）：
+    只在"营业收入>0 且报过主营"……准确说，只取 营业收入>0 的企业，其主营缺失按 0 计；
+    未报营业收入的那行企业从分子分母一并剔除。避免"部分企业没报营收 → 分母被压小 →
+    区域主营占比逆天(>100%)"的失真。
+    返回 (地区,年度,主营业务收入占比) 的 DataFrame；数据不足返回 None。
+    """
+    if '营业总收入中主营业务收入' not in detail.columns or '销售额或营业收入' not in detail.columns:
+        return None
+    dd = detail[detail['销售额或营业收入'] > 0]
+    if dd.empty:
+        return None
+    num = dd.groupby([COL_REGION, COL_YEAR])['营业总收入中主营业务收入'].sum(min_count=1)
+    den = dd.groupby([COL_REGION, COL_YEAR])['销售额或营业收入'].sum(min_count=1)
+    return (num / den).rename('主营业务收入占比').reset_index()
+
+
+def add_region_metrics(region_df, detail=None):
+    """在地区×年度聚合表上计算全部派生指标（地区整体口径）。返回新 DataFrame。
+
+    detail：企业明细（可选）。提供时，"主营业务收入占比"改用企业级加权口径
+    （分子分母同主体），规避未报营业收入导致的区域占比>100%失真。
+    """
     region_df = region_df.copy()
     sales = region_df['销售额或营业收入']
     region_df['销售净利率'] = safe_div(region_df['净利润'], sales)
@@ -87,20 +111,24 @@ def add_region_metrics(region_df):
         adjacent & prev_assets.notna(), region_df['资产总额'])
     region_df['总资产周转率'] = safe_div(sales, avg_asset)
 
-    # 增长率（年度数据下 同比=环比）
+    # 增长率（仅同比：与上一相邻年度比较）
     region_df['销售额同比增长率'] = strict_growth(region_df, '销售额或营业收入')
-    region_df['销售额环比增长率'] = region_df['销售额同比增长率']
     region_df['净利润同比增长率'] = strict_growth(region_df, '净利润')
-    region_df['净利润环比增长率'] = region_df['净利润同比增长率']
     region_df['资产总额同比增长率'] = strict_growth(region_df, '资产总额')
-    region_df['资产总额环比增长率'] = region_df['资产总额同比增长率']
     region_df['主营业务收入同比增长率'] = strict_growth(region_df, '营业总收入中主营业务收入')
-    region_df['主营业务收入环比增长率'] = region_df['主营业务收入同比增长率']
 
     # 地区年度波动（销售额/净利润 的年度标准差）
     for col, std_col in [('销售额或营业收入', '销售额标准差'), ('净利润', '净利润标准差')]:
         s = region_df.groupby(COL_REGION)[col].std().rename(std_col)
         region_df = region_df.merge(s, left_on=COL_REGION, right_index=True, how='left')
+
+    # 主营业务收入占比：如提供明细则覆盖为企业级加权口径（分子分母同主体）
+    if detail is not None and not detail.empty:
+        fr = _firm_main_ratio(detail)
+        if fr is not None:
+            region_df = region_df.drop(columns=['主营业务收入占比']).merge(
+                fr, on=[COL_REGION, COL_YEAR], how='left')
+            region_df = region_df.sort_values([COL_REGION, COL_YEAR]).reset_index(drop=True)
 
     return region_df
 
@@ -188,6 +216,41 @@ def region_summary(region_df):
             '最新年度净利润同比': last['净利润同比增长率'],
         })
     return pd.DataFrame(rows)
+
+
+def data_quality_notes(region_df):
+    """按「地区 × 年度」检测数据质量疑点，返回以 (地区,年度) 为索引、值为提示文本的 Series。
+
+    仅做客观口径判断、不改动数值，供导出/展示附加▲提示：
+      - 区域主营业务收入占比>100%（存在企业主营收入＞营业收入，单企不可能）：疑主营列错录；
+      - |净利润| ≥ 2×资产总额（亏损远超其资产规模）：疑数字错位/添位。
+    """
+    d = region_df
+    notes = {}
+    idx = []
+
+    def _num(v):
+        try:
+            f = float(v)
+            return f if not np.isnan(f) else np.nan
+        except (TypeError, ValueError):
+            return np.nan
+
+    for (region, year), g in d.groupby([COL_REGION, COL_YEAR]):
+        r = g.iloc[0]
+        tags = []
+        ratio = _num(r.get('主营业务收入占比'))  # 已按同口径(分子分母同主体)计算的区域主营占比
+        net = _num(r.get('净利润'))
+        asset = _num(r.get('资产总额'))
+        if ratio == ratio and ratio > 1.0:
+            tags.append('主营业务收入占比>100%：区内存在企业主营收入＞营业收入，请核对主营收入原始填报')
+        if asset == asset and asset > 0 and net == net and abs(net) >= 2 * asset:
+            tags.append('|净利润|≥2×资产总额，疑数字错录，请核对净利润原始填报')
+        notes[(region, year)] = '；'.join(tags)
+        idx.append((region, year))
+    s = pd.Series([notes[k] for k in idx], index=pd.MultiIndex.from_tuples(idx,
+                  names=[COL_REGION, COL_YEAR]), dtype=object)
+    return s
 
 
 def metrics_for_display(df):

@@ -6,7 +6,7 @@ Word 报告生成模块（可开关 · 自由排序 · 样式可选）
 - 报告由若干「模块」组成，每个模块可：启用/关闭、调整顺序（自由排序）、
   自选呈现样式（表格 / 柱状图 / 折线图）。
 - 默认按用户要求：
-    1) 不显示 纳税总额、负债总额、资产负债率、销售净利率、净利润率、环比增长率；
+    1) 不显示 纳税总额、负债总额、资产负债率、销售净利率、净利润率；
        企业公示分布默认不分析；增长率用折线图；
     2) 着重文字分析（每个模块先给文字分析段落，不是满屏图表）；
     3) 涉及净资产收益率(ROE)、总资产周转率时附文字解释，说明其反映经营哪些方面；
@@ -110,7 +110,7 @@ def _load_analysis():
     detail, msgs = file_loader.load_all()
     if detail.empty:
         return detail, pd.DataFrame(), pd.DataFrame()
-    region = add_region_metrics(region_yearly(detail))
+    region = add_region_metrics(region_yearly(detail), detail)
     _, pub = publish_by_region_year(detail)
     return detail, region, pub
 
@@ -762,7 +762,7 @@ def generate_from_data(detail_df=None, region_df=None, info=None, modules=None, 
     if detail_df is None:
         detail_df, region_df, _ = _load_analysis()
     if region_df is None and not detail_df.empty:
-        region_df = add_region_metrics(region_yearly(detail_df))
+        region_df = add_region_metrics(region_yearly(detail_df), detail_df)
     _, pub = publish_by_region_year(detail_df) if not detail_df.empty else (None, pd.DataFrame())
     if modules is None or hide is None:
         modules, hide = load_config()

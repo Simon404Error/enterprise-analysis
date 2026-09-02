@@ -15,7 +15,8 @@ from config import (OUTPUT_XLSX, COL_REGION, COL_YEAR, NUMERIC_COLS, GROWTH_COLS
                     MAIN_INCOME_WARN, TURNOVER_ACTIVE,
                     PUBLISH_ALL, PUBLISH_PART, PUBLISH_NONE)
 from analysis import (region_yearly, add_region_metrics, publish_by_region,
-                      publish_by_region_year, region_summary, metrics_for_display, safe_div)
+                      publish_by_region_year, region_summary, metrics_for_display, safe_div,
+                      data_quality_notes)
 
 # 「地区年度明细」表中删除的列（M-O：是否股权转让、是否对外投资、来源文件）
 _DROP_COLS = ['是否股权转让', '是否对外投资', '来源文件']
@@ -51,24 +52,88 @@ _NUM_LABELS = ['销售额或营业收入', '净利润', '资产总额', '营业�
 
 
 # ---------------- 静态 Excel ----------------
+def _weighted_main_ratio(detail_df):
+    """明细层面「主营业务收入占比」（地区×年度，分子分母同主体）。"""
+    if (detail_df is None or detail_df.empty or
+            '营业总收入中主营业务收入' not in detail_df.columns or
+            '销售额或营业收入' not in detail_df.columns):
+        return None
+    dd = detail_df[detail_df['销售额或营业收入'] > 0]
+    if dd.empty:
+        return None
+    return (dd.groupby([COL_REGION, COL_YEAR])['营业总收入中主营业务收入'].sum(min_count=1)
+            / dd.groupby([COL_REGION, COL_YEAR])['销售额或营业收入'].sum(min_count=1)
+            ).rename('主营业务收入占比').reset_index()
+
+
+def _weighted_main_ratio_pooled(detail_df):
+    """地区(跨年合计)层面的同口径主营占比，用于年度=ALL 行。"""
+    if (detail_df is None or detail_df.empty or
+            '营业总收入中主营业务收入' not in detail_df.columns or
+            '销售额或营业收入' not in detail_df.columns):
+        return None
+    dd = detail_df[detail_df['销售额或营业收入'] > 0]
+    if dd.empty:
+        return None
+    return (dd.groupby(COL_REGION)['营业总收入中主营业务收入'].sum(min_count=1)
+            / dd.groupby(COL_REGION)['销售额或营业收入'].sum(min_count=1))
+
+
+# 全部地区合并时的地区名（明细表末行等）
+ALL_REGION = '全部地区'
+
+
+def _region_block(region_df_single, detail_single):
+    """把『单个地区（其 region_df 只含该地区）』拼成「地区年度明细」行：
+    逐年度行 + 跨年合计行（年度=ALL），列与明细表一致，含数据提示。"""
+    detail = metrics_for_display(region_df_single)
+    detail = detail.drop(columns=[c for c in _DROP_COLS if c in detail.columns])
+    base_all = _build_all_rows(region_df_single)
+    pooled = _weighted_main_ratio_pooled(detail_single)
+    if pooled is not None:
+        base_all['主营业务收入占比'] = base_all[COL_REGION].map(pooled)
+    all_rows = metrics_for_display(base_all)
+    all_rows = all_rows.drop(columns=[c for c in _DROP_COLS if c in all_rows.columns])
+    notes = data_quality_notes(region_df_single).to_dict()
+    blk = pd.concat([detail.sort_values(COL_YEAR), all_rows], ignore_index=True)
+    blk['数据提示'] = blk.apply(
+        lambda row: notes.get((row[COL_REGION], row[COL_YEAR]), '')
+        if row[COL_YEAR] != _ALL_YEAR else '', axis=1)
+    return blk
+
+
+def combined_block(detail_df, label=ALL_REGION):
+    """把所有地区当作一个地区合并，返回逐年度行 + 跨年合计(ALL) 行，
+    列同「地区年度明细」。用于明细表末行与可视化汇总表。"""
+    if detail_df is None or detail_df.empty:
+        return pd.DataFrame()
+    dd = detail_df.copy()
+    dd[COL_REGION] = label
+    rc = add_region_metrics(region_yearly(dd), dd)
+    return _region_block(rc, dd)
+
+
 def write_result_excel(detail_df, region_df=None, path=None):
-    """生成「分析结果汇总.xlsx」。region_df 为地区×年度指标表。"""
+    """生成「分析结果汇总.xlsx」。region_df 为地区×年度指标表。
+    明细表按地区分行（逐年度+跨年合计），末行追加「全部地区」合并块。"""
     path = path or OUTPUT_XLSX
     if region_df is None:
-        region_df = add_region_metrics(region_yearly(detail_df))
-    detail = metrics_for_display(region_df)
-    # 删除 M-O 三列（是否股权转让、是否对外投资、来源文件）
-    detail = detail.drop(columns=[c for c in _DROP_COLS if c in detail.columns])
-    # 跨年合计：每个地区数值列加总，年度记 ALL，比率按合计重算
-    all_rows = metrics_for_display(_build_all_rows(region_df))
-    all_rows = all_rows.drop(columns=[c for c in _DROP_COLS if c in all_rows.columns])
-    # 同地区放一起：先逐年度行，再追加该地区跨年合计行
+        region_df = add_region_metrics(region_yearly(detail_df), detail_df)
+    # 主营占比固定改用"分子分母同主体"的企业级口径，规避区内部分企业未报营收致分母失真
+    w = _weighted_main_ratio(detail_df)
+    if w is not None:
+        region_df = region_df.drop(columns=['主营业务收入占比']).merge(
+            w, on=[COL_REGION, COL_YEAR], how='left')
+        region_df = region_df.sort_values([COL_REGION, COL_YEAR]).reset_index(drop=True)
+    # 各地区块（逐年度 + 跨年合计）
     parts = []
-    for region in sorted(detail[COL_REGION].unique()):
-        parts.append(detail[detail[COL_REGION] == region].sort_values(COL_YEAR))
-        arow = all_rows[all_rows[COL_REGION] == region]
-        if not arow.empty:
-            parts.append(arow)
+    for region in sorted(region_df[COL_REGION].unique()):
+        ds = detail_df[detail_df[COL_REGION] == region] if not detail_df.empty else detail_df
+        parts.append(_region_block(region_df[region_df[COL_REGION] == region], ds))
+    # 末行：全部地区合并块
+    cb = combined_block(detail_df)
+    if not cb.empty:
+        parts.append(cb)
     detail = pd.concat(parts, ignore_index=True)
     summary = metrics_for_display(region_summary(region_df))
     # 公示分布按「地区 × 年度」区分，不计跨年总和
@@ -188,7 +253,7 @@ def generate_region_report(region_df, region, pub_tab=None):
         tips.append('仅有 1 个年度数据，无法计算增长率。')
     n_na = int(sub['销售额同比增长率'].isna().sum() - (1 if len(sub) else 0))
     if n_na > 0:
-        tips.append(f'有 {n_na} 条因上年数据缺失（或断档/为 0），增长率为 NA。')
+        tips.append(f'有 {n_na} 条因上年缺失（或断档/上年≤0/由亏转盈）而无有效同比，增长率为 NA（避免无意义%）。')
     if (sub['所有者权益合计'] == 0).any():
         tips.append(f'有 {int((sub["所有者权益合计"] == 0).sum())} 条所有者权益为 0，ROE 为 NA。')
     if (sub['所有者权益合计'] < 0).any():
@@ -206,7 +271,7 @@ def generate_report(detail_df, region_df=None, region=None):
     if detail_df is None or detail_df.empty:
         return '# 经营状况报告\n\n（当前筛选条件下无数据）'
     if region_df is None:
-        region_df = metrics_for_display(add_region_metrics(region_yearly(detail_df)))
+        region_df = metrics_for_display(add_region_metrics(region_yearly(detail_df), detail_df))
     _, pub_tab = publish_by_region(detail_df)
     if region:
         return generate_region_report(region_df, region, pub_tab)
@@ -222,6 +287,6 @@ if __name__ == '__main__':
     for m in msgs:
         print(m)
     if not d.empty:
-        region = metrics_for_display(add_region_metrics(region_yearly(d)))
+        region = metrics_for_display(add_region_metrics(region_yearly(d), d))
         print(write_result_excel(d, region))
         print(generate_report(d, region)[:400])

@@ -35,7 +35,7 @@ def load_data():
     detail, msgs = file_loader.load_all()
     if detail.empty:
         return detail, msgs
-    region_df = analysis.add_region_metrics(analysis.region_yearly(detail))
+    region_df = analysis.add_region_metrics(analysis.region_yearly(detail), detail)
     return detail, region_df, msgs
 
 
@@ -133,6 +133,27 @@ with tab1:
         show_cols = [COL_REGION, COL_YEAR] + NUMERIC_COLS + RATIO_COLS + GROWTH_COLS + STD_COLS
         disp = analysis.metrics_for_display(view)[show_cols]
         st.dataframe(disp, height=360)
+        _alerts = [v for v in analysis.data_quality_notes(view).to_dict().values() if v]
+        if _alerts:
+            st.caption('▲ 数据质量提示：' + ' ；'.join(sorted(set(_alerts))))
+
+        # 全部地区合并表：与「分析结果汇总.xlsx」末行同口径
+        st.subheader('全部地区合计（当前筛选地区合并，比率为 %）')
+        _fd = detail[detail[COL_REGION].isin(sel_regions)]
+        if _fd.empty:
+            st.info('（当前筛选无明细数据。）')
+        else:
+            _fd = _fd[(_fd[COL_YEAR] >= y0) & (_fd[COL_YEAR] <= y1)]
+            _cb = report_generator.combined_block(_fd)
+            if _cb.empty:
+                st.info('（当前筛选无数据。）')
+            else:
+                _ccols = [c for c in ([COL_REGION, COL_YEAR] + NUMERIC_COLS + RATIO_COLS
+                                      + GROWTH_COLS + STD_COLS + ['数据提示'])
+                          if c in _cb.columns]
+                st.dataframe(_cb[_ccols], height=360)
+                st.caption('首行为逐年合并值；末行（年度=ALL）为所选年份跨年合计；'
+                           '主营收入占比按"同主体"口径、增长率为逐年相邻年度同比。')
 
         st.subheader('企业公示分布（本地区内企业，12 项判定，按年区分）')
         _, pub_tab = analysis.publish_by_region_year(detail)
