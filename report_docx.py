@@ -121,6 +121,18 @@ def _fmt(v, digits=2):
     return f'{v:,.{digits}f}'
 
 
+def _fix_year_axis(ax, years):
+    """把折线图横轴固定为实际出现年份刻度（避免 matplotlib 自动放大到离谱范围）。"""
+    years = sorted(years)
+    if not years:
+        return
+    ax.set_xticks(years)
+    if len(years) == 1:
+        ax.set_xlim(years[0] - 1, years[0] + 1)
+    else:
+        ax.set_xlim(min(years) - 1, max(years) + 1)
+
+
 def _overall_table(detail, region, hide):
     cnt = detail.groupby([COL_REGION, COL_YEAR]).size().rename('企业数量').reset_index()
     rows = []
@@ -270,6 +282,7 @@ def _chart_overall(region, style, img_dir):
         fig, ax = plt.subplots(figsize=(7.2, 3.4))
         ax.plot(g[COL_YEAR], g['销售额'], marker='o', label='销售额')
         ax.plot(g[COL_YEAR], g['净利润'], marker='s', label='净利润')
+        _fix_year_axis(ax, region[COL_YEAR].unique())
         ax.set_xlabel('年度'); ax.set_ylabel('万元'); ax.set_title('销售额与净利润趋势（万元）')
         ax.legend(); ax.grid(True, alpha=0.3)
         fig.tight_layout()
@@ -307,6 +320,7 @@ def _chart_metrics(region, style, img_dir):
         fig, ax = plt.subplots(figsize=(7.2, 3.4))
         ax.plot(g[COL_YEAR], g['ROE'], marker='o', label='净资产收益率(ROE)%')
         ax.plot(g[COL_YEAR], g['周转'], marker='s', label='总资产周转率%')
+        _fix_year_axis(ax, region[COL_YEAR].unique())
         ax.set_xlabel('年度'); ax.set_ylabel('%')
         ax.set_title('地区整体 ROE / 总资产周转率 趋势')
         ax.legend(); ax.grid(True, alpha=0.3)
@@ -321,20 +335,38 @@ def _chart_growth(region, growth_cols, style, img_dir):
     if region.empty or not growth_cols:
         return None
     if style == '折线图':
+        years = sorted(region[COL_YEAR].unique())
         n = len(growth_cols)
         fig, axes = plt.subplots(2, 2, figsize=(9.2, 6.4)) if n > 1 else \
             plt.subplots(1, 1, figsize=(9.2, 3.4))
         axes = np.array(axes).ravel()
+        any_any = False
         for ax, c in zip(axes, growth_cols):
+            any_valid = False
             for reg, g in region.groupby(COL_REGION):
                 g = g.sort_values(COL_YEAR)
                 vals = metrics_for_display(g)
-                if c in vals.columns:
-                    ax.plot(g[COL_YEAR], vals[c], marker='o', label=str(reg))
+                if c not in vals.columns:
+                    continue
+                mask = vals[c].notna()
+                if not mask.any():
+                    continue
+                any_valid = True
+                any_any = True
+                ax.plot(g.loc[mask, COL_YEAR], vals[c].loc[mask], marker='o', label=str(reg))
             ax.set_title(c.replace('同比增长率', '同比(%)'))
             ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
+            if len(years) == 1:
+                ax.set_xticks(years); ax.set_xlim(years[0] - 1, years[0] + 1)
+            else:
+                ax.set_xticks(years); ax.set_xlim(min(years) - 1, max(years) + 1)
+            if not any_valid:
+                ax.set_visible(False)
         for ax in axes[len(growth_cols):]:
             ax.set_visible(False)
+        if not any_any:
+            plt.close(fig)
+            return None
         fig.suptitle('各指标同比增长率（折线）')
         fig.tight_layout(rect=[0, 0, 1, 0.97])
         p = os.path.join(img_dir, '增长_折线图.png')
@@ -406,6 +438,7 @@ def _form_chart(df, mid, style, img_dir, growth_cols=None):
                     ax.plot(g[COL_YEAR], g['净资产收益率(ROE)'], marker='o', label='净资产收益率(ROE)%')
                 if '总资产周转率' in g:
                     ax.plot(g[COL_YEAR], g['总资产周转率'], marker='s', label='总资产周转率%')
+                _fix_year_axis(ax, df[COL_YEAR].unique())
                 ax.set_xlabel('年度'); ax.set_ylabel('%')
                 ax.set_title('经营指标年度趋势（%）')
                 ax.legend(); ax.grid(True, alpha=0.3)
@@ -414,21 +447,36 @@ def _form_chart(df, mid, style, img_dir, growth_cols=None):
             if not gcols:
                 return None
             if style == '折线图':
+                years = sorted(df[COL_YEAR].unique())
                 n = len(gcols)
                 if n > 1:
                     fig, axes = plt.subplots(2, 2, figsize=(9.2, 6.4))
                 else:
                     fig, axes = plt.subplots(1, 1, figsize=(9.2, 3.4))
                 axes = np.array(axes).ravel()
+                any_any = False
                 for ax, c in zip(axes, gcols):
+                    any_valid = False
                     for reg, g in df.groupby(COL_REGION):
                         g = g.sort_values(COL_YEAR)
-                        if c in g:
-                            ax.plot(g[COL_YEAR], g[c], marker='o', label=str(reg))
+                        if c not in g:
+                            continue
+                        mask = g[c].notna()
+                        if not mask.any():
+                            continue
+                        any_valid = True
+                        any_any = True
+                        ax.plot(g.loc[mask, COL_YEAR], g.loc[mask, c], marker='o', label=str(reg))
                     ax.set_title(c.replace('同比增长率', '同比(%)'))
                     ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
+                    _fix_year_axis(ax, years)
+                    if not any_valid:
+                        ax.set_visible(False)
                 for ax in axes[len(gcols):]:
                     ax.set_visible(False)
+                if not any_any:
+                    plt.close(fig)
+                    return None
                 fig.suptitle('各指标同比增长率（折线）')
                 fig.tight_layout(rect=[0, 0, 1, 0.97])
             else:
