@@ -3,10 +3,10 @@
 报告生成入口（企业生产经营离线分析）
 =====================================
 用法：
-  python 生成报告.py -a           方式A：直接从 data/ 计算结果生成 Word 报告
-  python 生成报告.py -f           生成「报告填写表单.xlsx」（方式B 的填写模板）
-  python 生成报告.py 报告填写表单.xlsx   方式B：读取已填表单生成 Word 报告
-  python 生成报告.py              交互菜单
+  python make_report.py -a           方式A：直接从 data/ 计算结果生成 Word 报告
+  python make_report.py -f           生成「报告填写表单.xlsx」（方式B 的填写模板）
+  python make_report.py 报告填写表单.xlsx   方式B：读取已填表单生成 Word 报告
+  python make_report.py              交互菜单
 
 图表：
   - 方式A 默认自动生成（离线）；可通过「图表映射.txt」或 report_img 目录替换为自定义图片。
@@ -45,7 +45,7 @@ def _make_form():
     print('生成填写表单…')
     path = report_docx.generate_form()
     print(f'已生成：{path}')
-    print('填写后运行：python 生成报告.py ' + os.path.basename(path))
+    print('填写后运行：python make_report.py ' + os.path.basename(path))
 
 
 def _way_b(form_path):

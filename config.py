@@ -18,6 +18,8 @@ REPORT_FORM_XLSX    = os.path.join(BASE_DIR, '报告填写表单.xlsx')    # 方
 REPORT_IMG_DIR      = os.path.join(BASE_DIR, 'report_img')          # 自定义图片目录（可选）
 # 图表映射文件（方式A 也支持）：每行「图表名称=图片文件路径」，优先于自动生成
 REPORT_IMG_MAP      = os.path.join(BASE_DIR, '图表映射.txt')
+# 报告模块/字段设置（可选 JSON）：{"modules":[{"id":...,"enabled":true,"order":1,"style":"表格"}...],"hide":[...]}
+REPORT_SETTINGS_JSON = os.path.join(BASE_DIR, '报告设置.json')
 
 # ---------------- 文件名规则 ----------------
 # 年度报告记录 (地区名).xlsx / .xls  或 年度报告记录 (地区名1).xlsx（数字为分卷号）
