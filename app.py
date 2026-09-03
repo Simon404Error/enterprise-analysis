@@ -155,6 +155,34 @@ with tab1:
                 st.caption('首行为逐年合并值；末行（年度=ALL）为所选年份跨年合计；'
                            '主营收入占比按"同主体"口径、增长率为逐年相邻年度同比。')
 
+        # ---- 纳税区间统计（按地区合计纳税额分档） ----
+        st.subheader('纳税区间统计（按各地区合计纳税额分档，金额单位：元）')
+        _avail_years = sorted(int(x) for x in view[COL_YEAR].dropna().unique())
+        _sel_years = st.multiselect('统计年度（可多选，增长率按相邻已选年度同比）',
+                                    _avail_years, default=_avail_years)
+        _preset = st.selectbox('纳税区间', [p[0] for p in report_generator.BRACKET_PRESETS]
+                               + ['自定义…'])
+        if _preset == '自定义…':
+            _b1, _b2 = st.columns(2)
+            _lo = _b1.number_input('下限(元，含)', min_value=0.0, value=0.0, step=100000.0)
+            _hi = _b2.number_input('上限(元，不含；0=不设上限)', min_value=0.0, value=0.0,
+                                   step=100000.0)
+            lo, hi = _lo, (None if _hi <= 0 else _hi)
+        else:
+            _bb = {p[0]: (p[1], p[2]) for p in report_generator.BRACKET_PRESETS}[_preset]
+            lo, hi = _bb
+        if not _sel_years:
+            st.info('请至少选择一个年度。')
+        else:
+            _bs = report_generator.bracket_stats(view, _sel_years, lo=lo, hi=hi)
+            _bsd = _bs.copy()
+            for _c in ['主营业务收入总额同比增长率', '利润总额同比增长率']:
+                _bsd[_c] = (_bsd[_c] * 100).round(2)
+            _bsd['地区数'] = _bsd['地区数'].astype(int)
+            st.dataframe(_bsd, height=280, use_container_width=True)
+            st.caption('档位：按各地区「该年度合计纳税额」划分（下含上不含，阈值元）。'
+                       '增长率 =（本年-上年相邻已选年度）/上年；上年缺失或≤0 记 NA。')
+
         st.subheader('企业公示分布（本地区内企业，12 项判定，按年区分）')
         _, pub_tab = analysis.publish_by_region_year(detail)
         pub_view = pub_tab[pub_tab[COL_REGION].isin(sel_regions)] if not pub_tab.empty else pub_tab

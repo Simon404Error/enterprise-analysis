@@ -82,6 +82,59 @@ def _weighted_main_ratio_pooled(detail_df):
 # 全部地区合并时的地区名（明细表末行等）
 ALL_REGION = '全部地区'
 
+# 地区"纳税规模"区间预设（下含上不含；上限 None = 不设上限）。阈值单位：元。
+# 说明：0-100万 / 100万-1000万 / 1000万以上，按某地区当年合计纳税总额分档。
+BRACKET_PRESETS = [
+    ('0-100万', 0, 1_000_000),
+    ('100万-1000万', 1_000_000, 10_000_000),
+    ('1000万以上', 10_000_000, None),
+]
+
+
+def bracket_stats(region_year, years, lo=0.0, hi=None):
+    """按地区纳税总额区间逐年度统计：落入该档的地区，其当年
+    主营业务收入总额、利润总额，及相邻已选年度的同比增长率。
+    region_year：地区×年度指标表（含 纳税总额/营业总收入中主营业务收入/利润总额）。
+    lo/hi：纳税区间（元，下含上不含；None 表示不设边界）。
+    返回 DataFrame：年度 | 地区数 | 主营业务收入总额 | 主营总额同比增长率 |
+                  利润总额 | 利润总额同比增长率(比率)。"""
+    lo = 0.0 if lo is None else float(lo)
+    hi = float('inf') if hi is None else float(hi)
+    years = sorted(int(y) for y in years if not pd.isna(y))
+    rows, p_main, p_profit = [], None, None
+    for y in years:
+        seg = region_year[region_year[COL_YEAR] == y]
+        sel = seg[(seg['纳税总额'] >= lo) & (seg['纳税总额'] < hi)]
+        main = float(sel['营业总收入中主营业务收入'].sum(min_count=1))
+        profit = float(sel['利润总额'].sum(min_count=1))
+        gm = ((main - p_main) / p_main) if (p_main is not None and p_main > 0 and main > 0) else np.nan
+        gp = ((profit - p_profit) / p_profit) if (p_profit is not None and p_profit > 0 and profit > 0) else np.nan
+        rows.append({COL_YEAR: y, '地区数': len(sel), '主营业务收入总额': main,
+                     '主营业务收入总额同比增长率': gm, '利润总额': profit,
+                     '利润总额同比增长率': gp})
+        p_main, p_profit = main, profit
+    return pd.DataFrame(rows)
+
+
+def bracket_table(region_year, presets=BRACKET_PRESETS):
+    """把各预设档、各年度拼接为一张长表（供 xlsx 工作表 / 网页）。
+    增长率列换算为百分数。列：档位|年度|地区数|主营业务收入总额|主营总额同比增长率|
+    利润总额|利润总额同比增长率。"""
+    years = sorted(int(y) for y in region_year[COL_YEAR].dropna().unique())
+    frames = []
+    for label, lo, hi in presets:
+        s = bracket_stats(region_year, years, lo, hi)
+        s.insert(0, '档位', label)
+        frames.append(s)
+    out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if not out.empty:
+        out['主营业务收入总额同比增长率'] = (out['主营业务收入总额同比增长率'] * 100).round(2)
+        out['利润总额同比增长率'] = (out['利润总额同比增长率'] * 100).round(2)
+        out = out[[c for c in ['档位', COL_YEAR, '地区数', '主营业务收入总额',
+                               '主营业务收入总额同比增长率', '利润总额', '利润总额同比增长率']
+                   if c in out.columns]]
+    return out
+
 
 def _region_block(region_df_single, detail_single):
     """把『单个地区（其 region_df 只含该地区）』拼成「地区年度明细」行：
@@ -144,6 +197,9 @@ def write_result_excel(detail_df, region_df=None, path=None):
         summary.to_excel(writer, sheet_name='地区汇总', index=False)
         if not pub_tab.empty:
             pub_tab.to_excel(writer, sheet_name='公示分布', index=False)
+        bt = bracket_table(region_df)
+        if not bt.empty:
+            bt.to_excel(writer, sheet_name='纳税区间统计', index=False)
 
     from openpyxl import load_workbook
     wb = load_workbook(path)
